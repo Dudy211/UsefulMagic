@@ -1,0 +1,27 @@
+{
+  "minVersion": "0.8.5",
+  "required": true,
+  "refmap": "usefulmagic.refmap.json",
+  "package": "cn.coostack.usefulmagic.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "mixins": [
+    "ItemPropertiesMixin",
+    "ItemStackMixin",
+    "EntityHolderMixin",
+    "EntityMixin",
+    "FallingBlockEntityAccessor",
+    "GameRulesBooleanValueInvoker",
+    "GameRulesInvoker",
+    "HooperBlockEntityMixin",
+    "LivingEntityMixin",
+    "PlayerMixin"
+  ],
+  "client": [
+    "client.CameraMixin",
+    "client.ItemInHandRendererMixin",
+    "client.MouseHandlerMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

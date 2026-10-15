@@ -1,0 +1,44 @@
+modLoader="kotlinforforge"
+loaderVersion="[4,)"
+license="GPL-3.0"
+
+[[mods]]
+modId="usefulmagic"
+version="${version}"
+displayName="UsefulMagic"
+description='''UsefulMagic by CooStack (1.20.1 Forge port)'''
+
+[[dependencies.usefulmagic]]
+    modId="forge"
+    mandatory=true
+    versionRange="${forge_loader_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.usefulmagic]]
+    modId="minecraft"
+    mandatory=true
+    versionRange="${minecraft_version_range}"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.usefulmagic]]
+    modId="kotlinforforge"
+    mandatory=true
+    versionRange="[${kotlin_for_forge_version},)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.usefulmagic]]
+    modId="cooparticlesapi"
+    mandatory=true
+    versionRange="[${coo_particles_api_version},)"
+    ordering="AFTER"
+    side="BOTH"
+
+[[dependencies.usefulmagic]]
+    modId="geckolib"
+    mandatory=true
+    versionRange="[${geckolib_version},)"
+    ordering="AFTER"
+    side="BOTH"

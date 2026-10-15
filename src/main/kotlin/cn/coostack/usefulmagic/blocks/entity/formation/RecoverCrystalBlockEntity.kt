@@ -1,0 +1,85 @@
+package cn.coostack.usefulmagic.blocks.entity.formation
+
+import cn.coostack.cooparticlesapi.network.particle.emitters.ParticleEmittersManager
+import cn.coostack.cooparticlesapi.utils.Math3DUtil
+import cn.coostack.cooparticlesapi.utils.RelativeLocation
+import cn.coostack.usefulmagic.blocks.entity.UsefulMagicBlockEntities
+import cn.coostack.usefulmagic.formation.api.BlockFormation
+import cn.coostack.usefulmagic.formation.api.FormationCrystal
+import cn.coostack.usefulmagic.formation.api.FormationTargetOption
+import cn.coostack.usefulmagic.particles.emitters.LightningParticleEmitters
+import cn.coostack.cooparticlesapi.extend.relativize
+import cn.coostack.usefulmagic.particles.composition.formation.crystal.CrystalComposition
+import cn.coostack.usefulmagic.particles.composition.formation.crystal.RecoverCrystalComposition
+import net.minecraft.core.BlockPos
+import net.minecraft.core.HolderLookup
+import net.minecraft.nbt.CompoundTag
+import net.minecraft.network.protocol.Packet
+import net.minecraft.network.protocol.game.ClientGamePacketListener
+import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket
+import net.minecraft.world.level.Level
+import net.minecraft.world.level.block.entity.BlockEntity
+import net.minecraft.world.level.block.state.BlockState
+import net.minecraft.world.phys.Vec3
+
+class RecoverCrystalBlockEntity(pos: BlockPos, state: BlockState) :
+    BlockEntity(UsefulMagicBlockEntities.RECOVER_CRYSTAL.get(), pos, state), FormationCrystal {
+    var recoverSpeed = 10
+
+    override fun saveAdditional(nbt: CompoundTag) {
+        nbt.putInt("recover_speed", recoverSpeed)
+    }
+
+    override fun load(tag: CompoundTag) {
+        recoverSpeed = tag.getInt("recover_speed")
+
+    }
+
+    override fun getUpdatePacket(): Packet<ClientGamePacketListener?>? {
+        return ClientboundBlockEntityDataPacket.create(this);
+    }
+
+    var time = 0
+
+    fun tick(
+        world: Level,
+        pos: BlockPos,
+        state: BlockState,
+    ) {
+        activeFormation ?: return
+        if (!activeFormation!!.isActiveFormation()) return
+        if (time++ % 20 == 0) {
+            val first =
+                activeFormation!!.activeCrystals.filter { it is EnergyCrystalsBlockEntity && it.currentMana + 1 <= it.maxMana }
+                    .map { it as EnergyCrystalsBlockEntity }
+                    .firstOrNull()
+            first?.let {
+                it.increase(recoverSpeed)
+                val start = this.crystalPos
+                val end = it.crystalPos
+
+            }
+        }
+    }
+
+    override var activeFormation: BlockFormation? = null
+    override var crystalPos: Vec3
+        get() = worldPosition.center
+        set(value) {
+        }
+
+    override fun handle(option: FormationTargetOption): FormationTargetOption {
+        return option
+    }
+
+    var style: CrystalComposition? = null
+    override fun onFormationActive(formation: BlockFormation) {
+        this.activeFormation = formation
+        if (level!!.isClientSide) return
+        style = RecoverCrystalComposition()
+        style!!.crystalPos = worldPosition
+        style!!.spawn(level!!, worldPosition.center.add(0.0, -0.4, 0.0))
+    }
+
+}
+

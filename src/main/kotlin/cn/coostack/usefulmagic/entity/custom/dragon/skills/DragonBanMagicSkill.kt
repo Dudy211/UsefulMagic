@@ -1,0 +1,267 @@
+package cn.coostack.usefulmagic.entity.custom.dragon.skills
+
+import cn.coostack.cooparticlesapi.network.particle.data.minRangeTo
+import cn.coostack.cooparticlesapi.extend.asVec3
+import cn.coostack.cooparticlesapi.extend.offsetRandomly
+import cn.coostack.cooparticlesapi.extend.plus
+import cn.coostack.cooparticlesapi.extend.random
+import cn.coostack.cooparticlesapi.network.particle.emitters.ParticleEmittersManager
+import cn.coostack.cooparticlesapi.supports.sound.ServerManagedSoundInstance
+import cn.coostack.cooparticlesapi.supports.sound.ServerSoundManager
+import cn.coostack.cooparticlesapi.supports.sound.SoundVolumeFalloff
+import cn.coostack.cooparticlesapi.supports.TextureSheetsEnum
+import cn.coostack.cooparticlesapi.utils.Math3DUtil
+import cn.coostack.cooparticlesapi.utils.ServerCameraUtil
+import cn.coostack.usefulmagic.damagetypes.UsefulMagicDamageSources
+import cn.coostack.usefulmagic.effects.UsefulMagicEffects
+import cn.coostack.usefulmagic.effects.asHolder
+import cn.coostack.usefulmagic.entity.custom.dragon.MagicDragonEntity
+import cn.coostack.usefulmagic.entity.custom.dragon.emitters.TrackingTailEmitter
+import cn.coostack.usefulmagic.entity.custom.dragon.phases.DragonHoverFlightPhase
+import cn.coostack.usefulmagic.entity.custom.dragon.playDragonSoundOnce
+import cn.coostack.usefulmagic.entity.custom.dragon.skills.emitter.CollectDisplayLineEmitter
+import cn.coostack.usefulmagic.entity.custom.dragon.skills.emitter.DragonCollectEmitter
+import cn.coostack.usefulmagic.extend.boxCenterPosition
+import cn.coostack.usefulmagic.extend.serverLevel
+import cn.coostack.usefulmagic.renderer.CylinderLaserRenderEntity
+import cn.coostack.usefulmagic.renderer.ShotWaveBillboardRenderEntity
+import cn.coostack.usefulmagic.renderer.UsefulMagicPostEffects
+import cn.coostack.usefulmagic.sounds.UsefulMagicSoundEvents
+import cn.coostack.usefulmagic.utils.EntityUtil
+import net.minecraft.server.level.ServerPlayer
+import net.minecraft.sounds.SoundSource
+import net.minecraft.world.effect.MobEffectInstance
+import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.phys.Vec3
+import kotlin.random.Random
+
+/**
+ * TODO 补充技能的阶段说明。
+ *
+ * 一个中场面，  释放后会让周围的玩家有60秒的魔力禁止时间
+ *
+ * 此技能为蓄力技能
+ * 会先以spawnPosition为中心释放一个大魔法阵，然后龙会环绕接近（Phase）
+ *
+ * 最后转换为Hover 技能结束的时候才会转换为Simple
+ *
+ * 蓄力方案：
+ *  - 召唤N个眼睛 （环绕在周围） 旋转速度加快靠拢， 最后放一个激光， 从内部向外直接扩散
+ *  - 中心召唤一个较大的魔法阵在龙的下面
+ *
+ */
+class DragonBanMagicSkill : DragonSkill() {
+    /** 禁魔技能的稳定标识。 */
+    companion object {
+        /** 技能管理器使用的稳定 ID。 */
+        const val ID = "dragon_ban_magic_skill"
+    }
+
+    override var chance: Double = 0.6
+
+    private var emitter: CollectDisplayLineEmitter? = null
+    private var sound: ServerManagedSoundInstance? = null
+    override fun getSkillCountDown(source: MagicDragonEntity): Int {
+        return 240 * 20
+    }
+
+    override fun onActive(source: MagicDragonEntity) {
+        source.phaseManager.forceSetPhase(
+            DragonHoverFlightPhase()
+        ) {
+            setCurrentTarget(source.spawnPosition)
+        }
+    }
+
+    override fun onRelease(source: MagicDragonEntity, holdingTick: Int) {
+
+        val world = source.serverLevel!!
+        val start = source.boxCenterPosition() + Vec3(0.0, 256.0, 0.0)
+        val end = source.boxCenterPosition() + Vec3(0.0, -256.0, 0.0)
+        CylinderLaserRenderEntity.spawn(
+            world, start, end, 15, 0,
+            maxRadius = 120F,
+            color = Math3DUtil.colorOf(255, 150, 240).asVec3(),
+            shrinkOnFadeOut = false,
+        ).apply {
+            brightness = 0.4F
+        }
+
+        playDragonSoundOnce(
+            source,
+            UsefulMagicSoundEvents.DRAGON_MAGIC_BAN.get(),
+            SoundSource.HOSTILE,
+            1.5F,
+            1F,
+            256.0,
+        )
+        source.addEffect(MobEffectInstance(UsefulMagicEffects.MAGIC_SEALED.asHolder().value(), 20 * 60))
+        world.getEntitiesOfClass(LivingEntity::class.java, source.boundingBox.inflate(256.0), EntityUtil.filterDragon).forEach {
+            it.hurt(UsefulMagicDamageSources.entityDamage(it.level(), source, source), 10F)
+            it.addEffect(MobEffectInstance(UsefulMagicEffects.MAGIC_SEALED.asHolder().value(), 20 * 60))
+            if (it is ServerPlayer) {
+
+
+                ServerCameraUtil.sendShake(world, source.boxCenterPosition(), 256.0, 6.2, 40, 5.0)
+                UsefulMagicPostEffects.playFlameExplodeFlash(it, 10, 2F, 0.85F)
+                UsefulMagicPostEffects.playRgbDashBlur(it, 20, 2F, 2F)
+            }
+        }
+
+        clear(source)
+    }
+
+    override fun getMaxHoldingTick(holdingEntity: MagicDragonEntity): Int {
+        return 20 * 12
+    }
+
+    override fun holdingTick(holdingEntity: MagicDragonEntity, holdTicks: Int) {
+        emitter?.teleportTo(holdingEntity.boxCenterPosition())
+        if (holdTicks < 20 * 2) {
+            return
+        }
+        if (sound == null && holdTicks <= 20 * 9) {
+            sound = ServerSoundManager.instance(
+                UsefulMagicSoundEvents.LASER_LOOP.get(),
+                SoundSource.HOSTILE
+            )
+                .volume(0.4F)
+                .visibleRange(256.0)
+                .pitch(0.2F)
+                .syncEveryTick(true)
+                .volumeFalloff(SoundVolumeFalloff.LINEAR)
+                .layer("dragon_ban_charging")
+                .uniqueKey()
+                .bindToEntity(holdingEntity)
+                .looping()
+                .spawn()
+        }
+        if (emitter == null && holdTicks <= 20 * 9) {
+            emitter =
+                CollectDisplayLineEmitter(holdingEntity.boxCenterPosition(), holdingEntity.serverLevel!!).apply {
+                    simpleData.apply {
+                        this.minSpeed = 1.2
+                        this.maxSpeed = 1.8
+                        this.minCount = 3
+                        this.maxCount = 5
+                    }
+                    this.color = Math3DUtil.colorOf(250, 236, 254)
+                    this.radius = 72.0
+                    this.maxTick = -1
+                    ParticleEmittersManager.spawnEmitters(this)
+                }
+        }
+        if (holdTicks % 5 == 0) {
+
+
+            ShotWaveBillboardRenderEntity.spawn(
+                holdingEntity.serverLevel!!, holdingEntity.boxCenterPosition(), 5, 5,
+                limitScale = 0.5F,
+                timeoutTick = 60,
+                scaleSpeed = -16F,
+                roll = Random.nextFloat(),
+                alpha = 0.1,
+                initialScale = 120F,
+                useWave2Texture = false
+            )
+        }
+        ServerCameraUtil.sendShake(
+            holdingEntity.serverLevel!!, holdingEntity.boxCenterPosition(), 256.0, 0.5, 10, 2.0
+        )
+        if (holdTicks > 20 * 9) {
+            sound?.fadeOut(10)
+            sound = null
+            emitter?.remove()
+            emitter = null
+            return
+        }
+
+        sound?.pitchMultiplier = (2.0 * (holdTicks - 40) / 140).toFloat()
+        if (holdTicks % 4 == 0) {
+            repeat(Random.nextInt(2, 3)) {
+
+                DragonCollectEmitter(
+                    holdingEntity.boxCenterPosition().offsetRandomly(Random.nextDouble(12.0, 32.0)),
+                    holdingEntity.level()
+                ).apply {
+                    collectTarget = holdingEntity.boxCenterPosition()
+                    strength = 1.5
+                    particleDefaultVelocity = Vec3.ZERO.random()
+                    randomData.apply {
+                        minAge = 40
+                        maxAge = 80
+                        minSize = 0.2
+                        maxSize = 0.4
+                        minSpeed = 3.0
+                        maxSpeed = 6.0
+                    }
+                    template.apply {
+                        setTextureSheet(TextureSheetsEnum.ADDITION_BLEND_TRANSLUCENT)
+                    }
+                    colorLeft = Math3DUtil.colorOf(190, 61, 237)
+                    colorRight = Math3DUtil.colorOf(250, 236, 254)
+                    collectNoiseOffset = Random.nextDouble(1.2, 2.3)
+                    maxTick = Random.nextInt(20, 40)
+                    ParticleEmittersManager.spawnEmitters(this)
+                }
+            }
+
+            val randomCount = (2 minRangeTo 5).random()
+            val color = Math3DUtil.colorOf(255, 150, 240)
+            repeat(randomCount) {
+                val targetPos = holdingEntity.boxCenterPosition()
+                val randomPos = targetPos.offsetRandomly(Random.nextDouble(16.0, 64.0))
+                val emitter = TrackingTailEmitter(randomPos, holdingEntity.level()).apply {
+                    trackingTarget = targetPos
+                    this.arriveCanceled = true
+                    particleConfig.apply {
+                        this.color = color
+                        this.visibleRange = 256F
+                        this.setTextureSheet(TextureSheetsEnum.ADDITION_BLEND_TRANSLUCENT)
+                    }
+                    this.simpleConfig.apply {
+                        this.minAge = 5
+                        this.maxAge = 9
+                        this.minCount = 3
+                        this.maxCount = 8
+                        this.minSize = 0.1
+                        this.maxSize = 0.3
+                        this.minSpeed = 2.5
+                        this.maxSpeed = 4.6
+                    }
+
+                    this.noiseStrength = 0.06
+                    this.offsetNoise = 0.5
+                    this.strength = 3.0
+                    this.velocity = Vec3.ZERO.random()
+                }
+                ParticleEmittersManager.spawnEmitters(emitter)
+            }
+        }
+
+    }
+
+    override fun stopHolding(entity: MagicDragonEntity, holdTicks: Int) {
+        clear(entity)
+    }
+
+    override fun getSkillID(): String {
+        return ID
+    }
+
+    private fun clear(entity: MagicDragonEntity) {
+        entity.phaseManager.resetDefaultPhase()
+        emitter?.remove()
+        emitter = null
+        sound?.fadeOut(10)
+        sound = null
+    }
+
+    override fun canTrigger(entity: MagicDragonEntity): Boolean {
+        return super.canTrigger(entity) && entity.health <= entity.dragonMaxHealth * 0.6
+    }
+
+    override fun testCancel(entity: MagicDragonEntity): Boolean {
+        return !(!entity.entityDeath && !entity.isDizzying() && !UsefulMagicEffects.isMagicSealed(entity))
+    }
+}

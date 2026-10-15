@@ -1,0 +1,91 @@
+package cn.coostack.usefulmagic.blocks.entity.formation
+
+import cn.coostack.cooparticlesapi.barrages.BarrageManager
+import cn.coostack.cooparticlesapi.utils.RelativeLocation
+import cn.coostack.usefulmagic.UsefulMagic
+import cn.coostack.usefulmagic.barrages.SwordAttackFormationBarrage
+import cn.coostack.usefulmagic.blocks.entity.UsefulMagicBlockEntities
+import cn.coostack.usefulmagic.formation.api.AttackCrystal
+import cn.coostack.usefulmagic.formation.api.BlockFormation
+import cn.coostack.usefulmagic.formation.api.FormationTargetOption
+import cn.coostack.usefulmagic.formation.target.BarrageTargetOption
+import cn.coostack.usefulmagic.formation.target.ProjectileEntityTargetOption
+import cn.coostack.usefulmagic.particles.composition.EndRodSwordComposition
+import cn.coostack.usefulmagic.particles.composition.formation.crystal.CrystalComposition
+import cn.coostack.usefulmagic.particles.composition.formation.crystal.SwordAttackCrystalComposition
+import net.minecraft.core.BlockPos
+import net.minecraft.network.protocol.Packet
+import net.minecraft.network.protocol.game.ClientGamePacketListener
+import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket
+import net.minecraft.server.level.ServerLevel
+import net.minecraft.world.level.block.entity.BlockEntity
+import net.minecraft.world.level.block.state.BlockState
+import net.minecraft.world.phys.Vec3
+import cn.coostack.cooparticlesapi.extend.*
+import kotlin.random.Random
+
+class SwordAttackCrystalsBlockEntity(pos: BlockPos, state: BlockState) :
+    BlockEntity(UsefulMagicBlockEntities.SWORD_ATTACK_CRYSTAL.get(), pos, state), AttackCrystal {
+    override var currentTime: Int = 0
+
+    override fun getUpdatePacket(): Packet<ClientGamePacketListener?>? {
+        return ClientboundBlockEntityDataPacket.create(this);
+    }
+
+    override var activeFormation: BlockFormation? = null
+    override var crystalPos: Vec3
+        get() = worldPosition.center
+        set(value) {
+        }
+
+    var style: CrystalComposition? = null
+    override fun onFormationActive(formation: BlockFormation) {
+        this.activeFormation = formation
+        if (level!!.isClientSide) return
+        style = SwordAttackCrystalComposition()
+        style!!.crystalPos = worldPosition
+        style!!.spawn(level!!, worldPosition.center.add(0.0, -0.4, 0.0))
+    }
+
+    val random = Random(System.nanoTime())
+    override fun shoot(option: FormationTargetOption) {
+        if (option is BarrageTargetOption) {
+            option.hit()
+            return
+        }
+        if (option is ProjectileEntityTargetOption) return
+
+
+
+        val range = (activeFormation?.getFormationTriggerRange() ?: 0.01) / 2
+        val spawnLocation = Vec3(
+            random.nextDouble(-range, range),
+            random.nextDouble(0.0, range),
+            random.nextDouble(-range, range),
+        ).add(activeFormation!!.formationCore)
+        val barrage =
+            SwordAttackFormationBarrage(spawnLocation, level as ServerLevel, 5.0, option)
+        val owner = activeFormation!!.owner?.let(UsefulMagic.server.playerList::getPlayer)
+        if (activeFormation!!.owner != null && owner == null) {
+            barrage.offlineShooter = activeFormation!!.owner
+        }
+        barrage.apply {
+            direction = spawnLocation.relativize(option.pos())
+            shooter = owner
+            val control = bindControl.get() as EndRodSwordComposition
+            control.addPreTickAction {
+                rotateToPoint(RelativeLocation.of(direction))
+            }
+        }
+        BarrageManager.spawn(barrage)
+    }
+
+    override fun take(): Int {
+        return 15
+    }
+
+    override fun duration(): Int {
+        return 13
+    }
+
+}

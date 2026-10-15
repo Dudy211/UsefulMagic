@@ -1,0 +1,7 @@
+{
+  "parent": "minecraft:item/generated",
+  "textures": {
+    "layer0": "usefulmagic:item/spell_bag_open_back",
+    "layer1": "usefulmagic:item/spell_bag_open_front"
+  }
+}

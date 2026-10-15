@@ -1,0 +1,53 @@
+package cn.coostack.usefulmagic.items.consumer
+
+import cn.coostack.usefulmagic.UsefulMagic
+import cn.coostack.usefulmagic.extend.manaAbsorptionRate
+import cn.coostack.usefulmagic.extend.maxMana
+import cn.coostack.usefulmagic.managers.client.ClientManaManager
+import net.minecraft.world.entity.player.Player
+import net.minecraft.world.item.Item
+import net.minecraft.world.item.ItemStack
+import net.minecraft.sounds.SoundSource
+import net.minecraft.sounds.SoundEvents
+import net.minecraft.network.chat.Component
+import net.minecraft.world.InteractionHand
+import net.minecraft.world.InteractionResultHolder
+import net.minecraft.world.item.TooltipFlag
+import net.minecraft.world.level.Level
+
+class RedManaCrystal : Item(Properties()) {
+
+    override fun appendHoverText(
+        stack: ItemStack,
+        level: Level?,
+        tooltip: MutableList<Component>,
+        tooltipFlag: TooltipFlag
+    ) {
+        super.appendHoverText(stack, level, tooltip, tooltipFlag)
+        tooltip.add(
+            Component.translatable("item.red_mana_crystal.description")
+        )
+    }
+
+    override fun use(world: Level, user: Player, hand: InteractionHand): InteractionResultHolder<ItemStack?> {
+        val stack = user.getItemInHand(hand)
+        val mana = user.manaAbsorptionRate
+        if (mana !in 30..<60) {
+            return InteractionResultHolder.fail(stack)
+        }
+
+        if (!world.isClientSide) {
+
+            world.playSound(
+                null, user.x, user.y, user.z,
+                SoundEvents.PLAYER_LEVELUP,
+                SoundSource.PLAYERS,
+                3f, 2f
+            )
+        }
+        user.manaAbsorptionRate += 3
+        stack.count -= 1
+        return super.use(world, user, hand)
+    }
+
+}

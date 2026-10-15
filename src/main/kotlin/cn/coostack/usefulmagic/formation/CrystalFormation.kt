@@ -1,0 +1,578 @@
+package cn.coostack.usefulmagic.formation
+
+import cn.coostack.cooparticlesapi.barrages.BarrageManager
+import cn.coostack.cooparticlesapi.network.particle.emitters.ParticleEmittersManager
+import cn.coostack.cooparticlesapi.particles.impl.ControlableCloudEffect
+import cn.coostack.cooparticlesapi.platform.CooParticlesServices
+import cn.coostack.cooparticlesapi.renderer.server.ServerRenderEntityManager
+import cn.coostack.cooparticlesapi.supports.TextureSheetsEnum
+import cn.coostack.cooparticlesapi.utils.Math3DUtil
+import cn.coostack.usefulmagic.UsefulMagic
+import cn.coostack.usefulmagic.barrages.api.DamagedBarrage
+import cn.coostack.usefulmagic.blocks.entity.formation.EnergyCrystalsBlockEntity
+import cn.coostack.usefulmagic.blocks.entity.formation.RecoverCrystalBlockEntity
+import cn.coostack.usefulmagic.formation.api.*
+import cn.coostack.usefulmagic.formation.target.BarrageTargetOption
+import cn.coostack.usefulmagic.formation.target.LivingEntityTargetOption
+import cn.coostack.usefulmagic.formation.target.ProjectileEntityTargetOption
+import cn.coostack.usefulmagic.managers.server.ServerFormationManager
+import cn.coostack.usefulmagic.packet.s2c.PacketS2CFormationBreak
+import cn.coostack.usefulmagic.packet.s2c.PacketS2CFormationCreate
+import cn.coostack.usefulmagic.particles.composition.formation.FormationComposition
+import cn.coostack.usefulmagic.particles.composition.formation.LargeFormationComposition
+import cn.coostack.usefulmagic.particles.composition.formation.MidFormationComposition
+import cn.coostack.usefulmagic.particles.composition.formation.SmallFormationComposition
+import cn.coostack.usefulmagic.particles.emitters.CircleEmitters
+import cn.coostack.usefulmagic.particles.emitters.LightningParticleEmitters
+import cn.coostack.usefulmagic.renderer.DefendCrystalRenderEntity
+import net.minecraft.server.level.ServerLevel
+import net.minecraft.server.level.ServerPlayer
+import net.minecraft.sounds.SoundEvents
+import net.minecraft.sounds.SoundSource
+import net.minecraft.world.entity.Entity
+import net.minecraft.world.entity.LivingEntity
+import net.minecraft.world.entity.animal.AbstractFish
+import net.minecraft.world.entity.animal.Animal
+import net.minecraft.world.entity.monster.Monster
+import net.minecraft.world.entity.player.Player
+import net.minecraft.world.entity.projectile.Projectile
+import net.minecraft.world.level.Level
+import net.minecraft.world.phys.AABB
+import net.minecraft.world.phys.Vec3
+import cn.coostack.cooparticlesapi.extend.*
+import java.util.*
+import kotlin.math.roundToInt
+
+class CrystalFormation(override var world: Level?, override var owner: UUID?, override var formationCore: Vec3) :
+    BlockFormation {
+    var style: FormationComposition? = null
+    var defendEntity: DefendCrystalRenderEntity? = null
+    override var uuid: UUID = UUID.randomUUID()
+        internal set
+    override var activeCrystals: MutableList<FormationCrystal> = ArrayList()
+    internal var active = false
+    var hasDefend = false
+    var hasAttack = false
+    var hasRecover = false
+
+
+    var formationHealth = 10f
+    val settings = FormationSettings()
+    override fun breakFormation(
+        damage: Float,
+        attackerOption: FormationTargetOption?
+    ) {
+        if (!active) return
+        formationHealth -= damage
+
+        if (world!!.isClientSide) return
+        val breakPacket = PacketS2CFormationBreak(ofFloored(formationCore), damage)
+        world!!.players().forEach {
+            it as ServerPlayer
+            CooParticlesServices.SERVER_NETWORK.send(breakPacket, it)
+        }
+        attackerOption?.let {
+            val pos = attackerOption.pos()
+            val dir = formationCore.relativize(pos)
+            val emitters =
+                CircleEmitters(pos, world)
+            emitters.apply {
+                maxTick = 1
+                templateData.also {
+                    it.effect = ControlableCloudEffect(uuid)
+                    it.size = 0.1f
+                    it.color = Math3DUtil.colorOf(147, 242, 255)
+                }
+                circleSpeed = 0.8
+                precentDrag = 0.6
+                circleDirection = dir
+            }
+            ParticleEmittersManager.spawnEmitters(emitters)
+        }
+        world!!.playSound(
+            null, formationCore.x, formationCore.y, formationCore.z,
+            SoundEvents.ZOMBIE_BREAK_WOODEN_DOOR, SoundSource.BLOCKS, 10F, 1F
+        )
+        if (formationHealth <= 0f) {
+            world!!.playSound(
+                null,
+                formationCore.x,
+                formationCore.y,
+                formationCore.z,
+                SoundEvents.BEACON_DEACTIVATE,
+                SoundSource.BLOCKS,
+                10f,
+                1f
+            )
+            defendEntity?.over()
+            defendEntity = null
+            scale = FormationScale.NONE
+            owner = null
+            active = false
+            activeCrystals.onEach { it.activeFormation = null }.clear()
+            formationHealth = 10f
+            inTriggerRangeActive = false
+            triggerTime = 0
+        }
+    }
+
+    var scale = FormationScale.NONE
+
+    override fun hasCrystalType(type: Class<out FormationCrystal>): Boolean {
+        if (DefendCrystal::class.java.isAssignableFrom(type)) {
+            return hasDefend
+        }
+        if (AttackCrystal::class.java.isAssignableFrom(type)) {
+            return hasAttack
+        }
+        if (RecoverCrystalBlockEntity::class.java.isAssignableFrom(type)) {
+            return hasRecover
+        }
+        return activeCrystals.any {
+            type.isAssignableFrom(it::class.java)
+        }
+    }
+
+    override fun getFormationTriggerRange(): Double {
+        return when (scale) {
+            FormationScale.NONE -> 0.0
+            FormationScale.SMALL -> 16.0
+            FormationScale.MID -> 32.0
+            FormationScale.LARGE -> 64.0
+        }
+    }
+
+    override fun getFormationScale(): FormationScale {
+        return scale
+    }
+
+    override fun isFriendly(option: FormationTargetOption): Boolean {
+        val optionOwnerUUID = option.getOwnerUUID()
+        owner ?: return optionOwnerUUID == null
+        optionOwnerUUID ?: return false
+
+        if (world!!.isClientSide) {
+            return true
+        }
+
+        val data = UsefulMagic.state.getDataFromServer(owner!!)
+
+        if (option is LivingEntityTargetOption) {
+            val target = option.target
+            val hostile = target is Monster
+            if (hostile && !settings.hostileEntityAttack) return true
+            val animal = target is Animal || target is AbstractFish
+            if (animal && !settings.animalEntityAttack) return true
+            if (target is Player && !settings.playerEntityAttack) return true
+            if (!animal && !hostile && !settings.anotherEntityAttack && target !is Player) return true
+            if (target is Player && (target.isSpectator || target.isCreative)) {
+                return true
+            }
+        }
+        return data.isFriend(optionOwnerUUID)
+    }
+
+    override fun canBeFormation(): Boolean {
+        return canBeFormation(FormationScale.SMALL)
+    }
+
+    override fun chunkLoaded(): Boolean {
+        val level = world ?: return false
+        val blockPos = ofFloored(formationCore)
+        return level.hasChunk(blockPos.x, blockPos.z)
+    }
+
+    private fun canBeFormation(scale: FormationScale): Boolean {
+        world ?: return false
+        val structure = scale.structure.map {
+            world!!.getBlockEntity(it.offset(ofFloored(formationCore)))
+        }
+        val allCrystal = structure.all {
+            if (it !is FormationCrystal) return@all false
+            true
+        }
+        val hasSpecialCrystal = structure.count {
+            it is AttackCrystal || it is DefendCrystal
+        } > 0
+
+        val hasEnergyCrystal = structure.count {
+            it is EnergyCrystalsBlockEntity
+        } > 0
+
+        return allCrystal && hasEnergyCrystal && hasSpecialCrystal
+
+    }
+
+    override fun isActiveFormation(): Boolean {
+        return active && formationHealth > 0f
+    }
+
+    override fun tryBuildFormation(): Boolean {
+        world ?: return false
+        if (!canBeFormation() || isActiveFormation()) {
+            return false
+        }
+        if (!world!!.isClientSide) {
+            if (ServerFormationManager.checkPosInFormationRange(formationCore, world as ServerLevel)) {
+                return false
+            }
+
+            val packet = PacketS2CFormationCreate(ofFloored(formationCore))
+            world!!.players().forEach {
+                CooParticlesServices.SERVER_NETWORK.send(packet, it as ServerPlayer)
+            }
+        }
+        val stack = arrayListOf(FormationScale.SMALL, FormationScale.MID, FormationScale.LARGE).iterator()
+        var updateScale = scale
+        if (scale == FormationScale.NONE) {
+            while (stack.hasNext()) {
+                val current = stack.next()
+                val canBeFormation = canBeFormation(current)
+                if (!canBeFormation) {
+                    break
+                }
+                updateScale = current
+            }
+            this.scale = updateScale
+        }
+        resetFormationHealth()
+        updateScale.structure.forEach {
+            val entity = world!!.getBlockEntity(it.offset(ofFloored(formationCore))) as? FormationCrystal
+            entity ?: return false
+            entity.onFormationActive(this)
+            activeCrystals.add(entity)
+            if (entity is AttackCrystal) {
+                hasAttack = true
+            }
+            if (entity is DefendCrystal) {
+                hasDefend = true
+            }
+            if (entity is RecoverCrystalBlockEntity) {
+                hasRecover = true
+            }
+        }
+        this.active = true
+        onBuild()
+        return true
+    }
+
+    /**
+     * 在阵法构建时(加载、主动创建)
+     * 都会执行这个方法
+     */
+    fun onBuild() {
+
+        if (world!!.isClientSide) {
+            return
+        }
+        ServerFormationManager.onFormationActive(this)
+        if (!settings.displayParticleOnlyTrigger && !world!!.isClientSide) {
+            createStyleOnBuild()
+            displayStyleOnBuild()
+        }
+        if (!settings.displayDefendBallOnlyTrigger && !world!!.isClientSide && hasDefend) {
+            createEntityOnBuild()
+            displayEntityOnBuild()
+        }
+    }
+
+    private fun createEntityOnBuild() {
+        defendEntity = DefendCrystalRenderEntity(world, formationCore, getFormationTriggerRange())
+            .also {
+                it.formationPos = formationCore
+            }
+    }
+
+    private fun displayEntityOnBuild() {
+        defendEntity ?: return
+        ServerRenderEntityManager.spawn(defendEntity!!)
+    }
+
+    private fun displayStyleOnBuild() {
+        style?.let {
+            it.formationPos = ofFloored(formationCore)
+            it.spawn(world!!, formationCore.add(0.0, -0.4, 0.0))
+        }
+    }
+
+    private fun createStyleOnBuild() {
+        when (scale) {
+            FormationScale.SMALL -> {
+                style = SmallFormationComposition()
+            }
+
+            FormationScale.MID -> {
+                style = MidFormationComposition()
+            }
+
+            FormationScale.LARGE -> {
+                style = LargeFormationComposition()
+            }
+
+            FormationScale.NONE -> {
+            }
+        }
+    }
+
+    var workTime = 0
+
+    /**
+     * 阵法被激活
+     */
+    var inTriggerRangeActive = false
+    var triggerTime = 0
+    override fun tick() {
+        val range = getFormationTriggerRange()
+        if (!active) return
+        world ?: return
+        val isServer = !world!!.isClientSide
+        activeCrystals.forEach(FormationCrystal::tick)
+        val box = AABB.ofSize(this.formationCore, range * 2, range * 2, range * 2)
+        var working = false
+        var triggerRange = settings.triggerRange
+        if (triggerRange < 0) {
+            triggerRange = range
+        }
+        world!!.getEntitiesOfClass(Entity::class.java, box) {
+            if (it.position().distanceTo(formationCore) > range) return@getEntitiesOfClass false
+            if (it.position()
+                    .distanceTo(formationCore) > triggerRange && !inTriggerRangeActive
+            ) return@getEntitiesOfClass false
+            when (it) {
+                is Projectile -> {
+                    !isFriendly(ProjectileEntityTargetOption(it))
+                }
+
+                is LivingEntity -> {
+                    !isFriendly(LivingEntityTargetOption(it))
+                }
+
+                else -> {
+                    false
+                }
+            }
+        }.forEach {
+            triggerTime = 120
+            inTriggerRangeActive = true
+            working = true
+            var option: FormationTargetOption? = when (it) {
+                is Projectile -> {
+                    ProjectileEntityTargetOption(it)
+                }
+
+                is LivingEntity -> {
+                    LivingEntityTargetOption(it)
+                }
+
+                else -> null
+            }
+            if (option != null) {
+                activeCrystals.forEach { crystal ->
+                    if (!option!!.isValid()) {
+                        return@forEach
+                    }
+                    option = crystal.handle(option)
+                }
+            }
+        }
+        if (isServer) {
+            BarrageManager.collectClipBarrages(world as ServerLevel, box).filter {
+                if (it.loc.distanceTo(formationCore) > range) {
+                    return@filter false
+                }
+                if (it.loc.distanceTo(formationCore) > triggerRange && !inTriggerRangeActive) return@filter false
+                val option = BarrageTargetOption(it)
+                !isFriendly(option)
+            }.forEach {
+                working = true
+                triggerTime = 120
+                inTriggerRangeActive = true
+                var option: FormationTargetOption = BarrageTargetOption(it)
+                for (crystal in activeCrystals.toList()) {
+                    if (!active || !option.isValid()) break
+                    option = crystal.handle(option)
+                }
+
+
+                val barrageStillAlive = option.isValid() && option.pos()
+                    .distanceTo(formationCore) <= 4.0 && option is BarrageTargetOption && option.target is DamagedBarrage
+                if (barrageStillAlive) {
+                    attack(option.target.damage.toFloat(), option, option.pos())
+                }
+            }
+        }
+
+        if (!active) return
+
+        if (!checkIntact()) {
+            breakFormation(Float.MAX_VALUE, null)
+        }
+        if (!isServer) return
+        if (triggerTime-- <= 0) {
+            triggerTime = 0
+            inTriggerRangeActive = false
+        }
+        displayTime--
+        if ((style == null || !(style?.isValid() ?: false))
+            && (inTriggerRangeActive || !settings.displayParticleOnlyTrigger)
+        ) {
+            createStyleOnBuild()
+            displayStyleOnBuild()
+        }
+        if (settings.displayDefendBallOnlyTrigger && !inTriggerRangeActive) {
+            defendEntity?.over()
+        }
+        if (defendEntity?.canceled == true) {
+            defendEntity = null
+        }
+        if (hasDefend && defendEntity == null
+            && (inTriggerRangeActive || !settings.displayDefendBallOnlyTrigger)
+        ) {
+            createEntityOnBuild()
+            displayEntityOnBuild()
+        }
+        style ?: return
+        if (!style!!.displayed) {
+            return
+        }
+        if (working) {
+            if (style!!.formationStatus != FormationComposition.FormationStatus.WORKING) {
+                style!!.changeStatus(FormationComposition.FormationStatus.WORKING)
+            }
+            workTime = 60
+        } else {
+            if (workTime-- <= 0) {
+                if (style!!.formationStatus != FormationComposition.FormationStatus.IDLE) {
+                    style!!.changeStatus(FormationComposition.FormationStatus.IDLE)
+                }
+                workTime = 0
+            }
+        }
+    }
+
+    /**
+     * 从其他水晶中调动能量
+     * @return 是否成功调动
+     */
+    override fun transformMana(requestCrystal: FormationCrystal, count: Int): Boolean {
+        world ?: return false
+        if (world!!.isClientSide) return false
+        var removed = count
+        val iterator = activeCrystals.filter { it is EnergyCrystalsBlockEntity }.iterator()
+        var current = iterator.next() as EnergyCrystalsBlockEntity
+        val response = ArrayList<EnergyCrystalsBlockEntity>()
+        var nextBreak = false
+        while (removed > 0) {
+            if (current.currentMana < removed) {
+                if (current.currentMana > 0) {
+                    response.add(current)
+                }
+                removed -= current.currentMana
+                current.decrease(current.currentMana)
+                current = iterator.next() as EnergyCrystalsBlockEntity
+            } else {
+                current.decrease(removed)
+                removed = 0
+                response.add(current)
+            }
+            if (nextBreak) break
+            if (!iterator.hasNext()) {
+                nextBreak = true
+            }
+        }
+        displayTransformManaParticle(requestCrystal, response)
+        return true
+    }
+
+    override fun attack(damage: Float, who: FormationTargetOption?, attackedPos: Vec3): Boolean {
+
+        if (who != null) {
+            if (isFriendly(who)) {
+                return false
+            }
+        }
+        if (!hasDefend) {
+
+            if (who !is LivingEntityTargetOption) {
+                who?.damage(damage, world!!.damageSources().magic())
+            }
+            breakFormation(damage, who)
+            return true
+        }
+
+        val defend = activeCrystals.firstOrNull() { it is DefendCrystal } ?: return false
+        val need = (damage * 10).roundToInt()
+        val hasMana = hasManaToTransform(need)
+        if (who !is LivingEntityTargetOption) {
+            who?.damage(damage, world!!.damageSources().magic())
+        }
+        if (hasMana) {
+            transformMana(defend, need)
+            return true
+        } else {
+            breakFormation(damage, who)
+            return false
+        }
+    }
+
+    private var displayTime = 0
+    private fun displayTransformManaParticle(
+        request: FormationCrystal,
+        responseCrystals: List<EnergyCrystalsBlockEntity>
+    ) {
+        displayTime = 1
+        responseCrystals.forEach {
+            val start = it.crystalPos
+            val end = request.crystalPos
+            val emitter = LightningParticleEmitters(start, world)
+                .apply {
+                    targetPos = end - start
+                    maxTick = 1
+                    templateData.apply {
+                        setTextureSheet(TextureSheetsEnum.ADDITION_BLEND_TRANSLUCENT_NOT_HDR)
+                        color = Math3DUtil.colorOf(230, 130, 255)
+                    }
+                    simpleData.apply {
+                        minAge = 3
+                        maxAge = 7
+                        minCount = 2
+                        maxCount = 4
+                        minSize = 0.05
+                        maxSize = 0.1
+                    }
+                }
+            ParticleEmittersManager.spawnEmitters(emitter)
+        }
+    }
+
+    override fun hasManaToTransform(count: Int): Boolean {
+        world ?: return false
+        val currentMana = activeCrystals.filter { it is EnergyCrystalsBlockEntity }.sumOf {
+            it as EnergyCrystalsBlockEntity
+            it.currentMana
+        }
+        return currentMana > count
+    }
+
+    private fun resetFormationHealth() {
+        formationHealth = when (scale) {
+            FormationScale.SMALL -> 100f
+            FormationScale.MID -> 500f
+            FormationScale.LARGE -> 100f
+            FormationScale.NONE -> 0f
+        }
+    }
+
+    /**
+     * 检查完整性，会有神人通过其他特殊方式将对应阵法的水晶替换
+     */
+    private fun checkIntact(): Boolean {
+        world ?: return false
+        val structure = scale.structure
+        return structure.all {
+            val entity = world!!.getBlockEntity(it.offset(ofFloored(formationCore)))
+            entity is FormationCrystal
+        }
+    }
+
+}

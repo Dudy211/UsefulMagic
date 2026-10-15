@@ -1,0 +1,218 @@
+plugins {
+    id 'java'
+    id 'org.jetbrains.kotlin.jvm' version "${kotlin_version}"
+    id 'net.minecraftforge.gradle' version '[6.0,6.2)'
+    id 'org.spongepowered.mixin' version '0.7.38'
+}
+
+version = project.version
+group = project.group
+
+base {
+    archivesName = "${mod_id}-forge-${minecraft_version}"
+}
+
+java {
+    toolchain { languageVersion = JavaLanguageVersion.of(17) }
+    withSourcesJar()
+}
+
+minecraft {
+    mappings channel: 'official', version: minecraft_version
+
+    // AccessTransformer：把 MC 里 protected/private 的成员开放为 public
+    //
+    // ⚠️⚠️ 这一行**绝对不能删**（2026-09-26 补）。
+    //
+    // 上游用 Fabric 的 `usefulmagic.accesswidener`；**Forge 不认 AccessWidener**，
+    // 只认本文件 + 这一行配置。之前移植时把 .accesswidener 原样搬来、
+    // 但没转成 AT 也没配这一行 ⇒ 下面这些引用在运行时抛 `IllegalAccessError`：
+    //
+    //   UsefulMagicRenderTypeFactory extends RenderType
+    //     → 直接读 RenderStateShard 的 protected static 字段
+    //       （TRANSLUCENT_TRANSPARENCY / NO_CULL / OVERLAY / COLOR_DEPTH_WRITE …）
+    //       —— 它既不在 RenderStateShard 的包里、也不是它的子类。
+    //
+    //   触发点：龙法阵眼睛边框（dragonCircleEyeBorder）一渲染就炸。
+    //
+    // 条目写 **SRG 名**（`f_110139_`），AT 作用在 SRG 阶段的 jar 上。
+    accessTransformer = file('src/main/resources/META-INF/accesstransformer.cfg')
+
+    runs {
+        client {
+            workingDirectory project.file('run')
+            // aarch64：LWJGL native 不在 MC 自带包里，直接告诉 JVM/LWJGL 去哪找
+            jvmArgs "-Djava.library.path=${projectDir}/natives-arm64", "-Dorg.lwjgl.librarypath=${projectDir}/natives-arm64"
+            // FML 的早期加载窗口需要 GLFW，headless 下关掉
+            property 'fml.earlyprogresswindow', 'false'
+            property 'geckolib.disable_examples', 'true'
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            mods { "${mod_id}" { source sourceSets.main } }
+        }
+        server {
+            workingDirectory project.file('run')
+            // GeckoLib 的 mods.toml 没声明 class=，dev 下 Forge 会挑中它 jar 里的
+            // 示例 mod 类并崩溃；这个属性让 GeckoLib 跳过示例注册。
+            property 'geckolib.disable_examples', 'true'
+            property 'forge.logging.markers', 'REGISTRIES'
+            property 'forge.logging.console.level', 'debug'
+            mods { "${mod_id}" { source sourceSets.main } }
+        }
+    }
+}
+
+sourceSets.main {
+    resources {
+        srcDir 'src/main/resources'
+        srcDir 'src/generated/resources'
+    }
+}
+
+repositories {
+    mavenCentral()
+    maven {
+        name = 'MinecraftForge'
+        url = 'https://maven.minecraftforge.net/'
+    }
+    maven {
+        name = 'KotlinForForge'
+        url = 'https://thedarkcolour.github.io/KotlinForForge/'
+    }
+    maven {
+        name = 'Aliyun'
+        url = 'https://maven.aliyun.com/repository/public'
+    }
+    maven {
+        name = 'GeckoLib'
+        url = 'https://dl.cloudsmith.io/public/geckolib3/geckolib/maven/'
+    }
+    maven {
+        name = 'BlameJared'
+        url = 'https://maven.blamejared.com'
+    }
+    flatDir { dirs 'depend', 'compile_only_depend' }
+}
+
+
+// MixinGradle：声明 refmap，编译期生成 official → SRG 的映射表
+mixin {
+    add sourceSets.main, "usefulmagic.refmap.json"
+    config "usefulmagic.mixins.json"
+}
+
+dependencies {
+    minecraft "net.minecraftforge:forge:${minecraft_version}-${forge_version}"
+
+    implementation "thedarkcolour:kotlinforforge:${kotlin_for_forge_version}"
+
+    // ==== CooParticlesAPI（已在 1.20.1 移植好）====
+    // 用本地 jar：depend/cooparticlesapi-forge-1.20.1-v7.jar
+    implementation fileTree(dir: 'depend', includes: ['cooparticlesapi*.jar'])
+
+    // ==== GeckoLib（模型动画）====
+    // 1.20.1 的坐标是 geckolib-forge-1.20.1
+    implementation "software.bernie.geckolib:geckolib-forge-${minecraft_version}:${geckolib_version}"
+
+    compileOnly fileTree(dir: 'compile_only_depend', includes: ['*.jar'])
+    // MC 自带的 gson（mixin 插件启用后似乎从 compileClasspath 掉了，显式声明）
+    compileOnly 'com.google.code.gson:gson:2.10.1'
+
+    // mixin / asm
+    compileOnly 'org.spongepowered:mixin:0.8.5'
+    compileOnly 'org.ow2.asm:asm:9.7'
+    compileOnly 'org.ow2.asm:asm-tree:9.7'
+    compileOnly 'io.github.llamalad7:mixinextras-common:0.3.5'
+    annotationProcessor 'io.github.llamalad7:mixinextras-common:0.3.5'
+
+    // Mixin 注解处理器：生成 refmap（official 名 → SRG 名）。
+    // Sponge 仓库的 pom 是 404，所以用本地 jar 走 files()。
+    annotationProcessor files('mixin-libs/mixin-processor.jar')
+
+    implementation 'io.github.classgraph:classgraph:4.8.184'
+
+    // ── aarch64 (Termux / Android) 的 LWJGL native ──
+    // MC 1.20.1 自带的 LWJGL 3.3.1 只有 linux/x64 的 native，
+    // arm64 上 runClient 会 UnsatisfiedLinkError: liblwjgl.so。
+    // 这些 jar 从 Maven 单独抓下来放在 lwjgl-arm64/ 里。
+    if (System.getProperty("os.arch") == "aarch64") {
+        def lwjglNativeJars = fileTree(dir: 'lwjgl-arm64', includes: ['*.jar'])
+        implementation lwjglNativeJars
+        runtimeOnly lwjglNativeJars
+    }
+}
+
+
+// ── 把 Mixin AP 未覆盖的 @Shadow 成员补进 refmap ──
+// 背景：`@Mixin` 类里的 @Shadow 不会被 AP 写进 refmap（只有 @Accessor/@Invoker 会）。
+// 没补的话，生产环境下 @Shadow 用 official 名找不到 SRG 名的字段 → 整局崩。
+// MixinGradle 会把待映射成员收集到 build/tmp/compileJava/compileJava-mappings.tsrg，
+// 这里用完整映射表回填进 refmap。
+tasks.named("compileJava").configure {
+    doLast {
+        def script = new File(rootDir, "scripts/merge_refmap.py")
+        if (script.exists()) {
+            def p = new ProcessBuilder("python3", script.absolutePath, projectDir.absolutePath)
+                .redirectErrorStream(true).start()
+            p.inputStream.eachLine { println "  [merge_refmap] " + it }
+            if (p.waitFor() != 0) throw new GradleException("merge_refmap 失败")
+        }
+    }
+}
+
+tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+    kotlinOptions {
+        jvmTarget = '17'
+        freeCompilerArgs += ['-Xjvm-default=all']
+    }
+}
+
+tasks.named('processResources', ProcessResources).configure {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    var expandProps = [
+            'version'                      : version,
+            'group'                        : project.group,
+            'minecraft_version'            : minecraft_version,
+            'minecraft_version_range'      : minecraft_version_range,
+            'mod_name'                     : mod_name,
+            'mod_author'                   : mod_author,
+            'mod_id'                       : mod_id,
+            'license'                      : license,
+            'description'                  : project.description,
+            'forge_version'                : forge_version,
+            'forge_loader_version_range'   : forge_loader_version_range,
+            'kotlin_for_forge_version'     : kotlin_for_forge_version,
+            'coo_particles_api_version'    : coo_particles_api_version,
+            'geckolib_version'             : geckolib_version,
+            'java_version'                 : java_version
+    ]
+    filesMatching(['pack.mcmeta', 'META-INF/mods.toml', '*.mixins.json']) {
+        expand expandProps
+    }
+    inputs.properties(expandProps)
+}
+
+jar {
+    manifest {
+        attributes([
+                'MixinConfigs'            : 'usefulmagic.mixins.json',
+                'Specification-Title'     : mod_name,
+                'Specification-Vendor'    : mod_author,
+                'Specification-Version'   : project.jar.archiveVersion,
+                'Implementation-Title'    : project.name,
+                'Implementation-Version'  : project.jar.archiveVersion,
+                'Implementation-Vendor'   : mod_author,
+                'Built-On-Minecraft'      : minecraft_version
+        ])
+    }
+}
+
+// ── 所有 Jar 任务统一去重策略 ──
+// 背景：1.21 与 1.20.1 两套生成资源里有重名文件，
+// sourcesJar 会因此报 "duplicate but no duplicate handling strategy" 而中断 `build`，
+// 导致 reobfJar 之后的链路跑不完，build/libs 里留下**未 reobf 的开发版 jar**
+// → 生产环境 @Shadow 用 official 名匹配 SRG 目标，启动即崩。
+tasks.withType(Jar).configureEach {
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
