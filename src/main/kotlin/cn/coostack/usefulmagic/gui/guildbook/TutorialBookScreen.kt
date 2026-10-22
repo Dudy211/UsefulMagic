@@ -262,6 +262,9 @@ open class TutorialBookScreen :
     }
 
     override fun render(context: GuiGraphics, mouseX: Int, mouseY: Int, delta: Float) {
+
+
+        renderBackground(context)
         super.render(context, mouseX, mouseY, delta)
         context.blit(
             TUTORIAL_BOOK_TITLE,

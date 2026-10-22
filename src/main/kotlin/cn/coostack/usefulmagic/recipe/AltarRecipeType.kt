@@ -37,14 +37,68 @@ class AltarRecipeType(
     object AltarRecipeSerializer : RecipeSerializer<AltarRecipeType> {
         const val ID = "altar_recipe"
 
-        /** 1.20.1 的 JSON 解析（对应 1.20.5+ 的 codec()） */
+        /**
+         * 1.20.1 的 JSON 解析（对应 1.20.5+ 的 codec()）。
+         *
+         * ★ 2026-10-22 修复:原来这里是个空壳 —— 三个字段全赋 `EMPTY`,
+         * 只读了 mana_need/tick。结果 23 个配方全解析成空配方 →
+         * 手册显示「配方数: 0」、祭坛也无法合成。
+         */
         override fun fromJson(recipeId: ResourceLocation, json: com.google.gson.JsonObject): AltarRecipeType {
-            val output = ItemStack.EMPTY
-            val round = RoundShapeRecipe.EMPTY
-            val center = Ingredient.EMPTY
+            val output = parseItemStack(json.getAsJsonObject("output"))
+            val round = parseRoundShape(json.getAsJsonObject("data"))
+            val center = parseIngredient(json.get("center"))
+                ?: net.minecraft.world.item.crafting.Ingredient.EMPTY
             val manaNeed = json.get("mana_need")?.asInt ?: 0
             val tick = json.get("tick")?.asInt ?: 0
             return AltarRecipeType(output, round, center, manaNeed, tick)
+        }
+
+        /**
+         * 解析 ItemStack。
+         *
+         * ⚠️ 数据文件用的是 1.20.5+ 格式 `{"id": "...", "count": N}`,
+         * 而 1.20.1 的 `ItemStack.CODEC` 要的是 `{"item": "..."}`。
+         * 这里两种都兼容。
+         */
+        private fun parseItemStack(obj: com.google.gson.JsonObject?): ItemStack {
+            if (obj == null) return ItemStack.EMPTY
+            val idStr = when {
+                obj.has("item") -> obj.get("item").asString
+                obj.has("id") -> obj.get("id").asString
+                else -> return ItemStack.EMPTY
+            }
+            val id = ResourceLocation.tryParse(idStr) ?: return ItemStack.EMPTY
+            val item = net.minecraft.core.registries.BuiltInRegistries.ITEM.get(id)
+            if (item == net.minecraft.world.item.Items.AIR) return ItemStack.EMPTY
+            val count = obj.get("count")?.asInt ?: 1
+            return ItemStack(item, count)
+        }
+
+        /** 解析环形基座（8 个槽位，key 为 "0".."7"）。 */
+        private fun parseRoundShape(obj: com.google.gson.JsonObject?): RoundShapeRecipe {
+            if (obj == null) return RoundShapeRecipe.EMPTY
+            val list = net.minecraft.core.NonNullList.withSize(
+                8, net.minecraft.world.item.crafting.Ingredient.EMPTY
+            )
+            obj.entrySet().forEach { (key, value) ->
+                val index = key.toIntOrNull() ?: return@forEach
+                if (index !in 0..7) return@forEach
+                list[index] = parseIngredient(value) ?: net.minecraft.world.item.crafting.Ingredient.EMPTY
+            }
+            return RoundShapeRecipe(list)
+        }
+
+        /** 解析单个 Ingredient（支持 `{"item":...}` / `{"tag":...}` / 数组）。 */
+        private fun parseIngredient(
+            element: com.google.gson.JsonElement?
+        ): net.minecraft.world.item.crafting.Ingredient? {
+            if (element == null || element.isJsonNull) return null
+            return try {
+                net.minecraft.world.item.crafting.Ingredient.fromJson(element)
+            } catch (_: Exception) {
+                null
+            }
         }
 
         /** 1.20.1 的网络读取 */
